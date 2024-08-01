@@ -30,6 +30,7 @@ import static org.apache.spark.sql.functions.collect_list;
 import static org.apache.spark.sql.functions.concat;
 import static org.apache.spark.sql.functions.concat_ws;
 import static org.apache.spark.sql.functions.explode;
+import static org.apache.spark.sql.functions.initcap;
 import static org.apache.spark.sql.functions.lit;
 import static org.apache.spark.sql.functions.regexp_replace;
 import static org.apache.spark.sql.functions.split;
@@ -46,15 +47,152 @@ public class SparkRunProcess implements ApplicationRunner {
     private Dataset<Row> dataset;
     private Dataset<Row> datasetRoot;
 
-    //@Override
-    public void runA(ApplicationArguments args) throws Exception {
-
-    }
     @Override
     public void run(ApplicationArguments args) throws Exception {
+        this.carregaElasticSearchV1(args);
+    }
+
+    public void carregaElasticSearchV1(ApplicationArguments args) throws Exception {
         System.out.println("Executando");
         var warehouseLocation = new File("/spark-databases").getAbsolutePath();
-        var pathDataSet = DATABASE_PATH.concat("*.xlsx");
+        var pathDataSetRegions = DATABASE_PATH.concat("regions.csv");
+        var pathDataSet = DATABASE_PATH.concat("SuperBaseMunicipiosMundo.xlsx");
+
+        this.spark = SparkSession.builder()
+                .appName("search-cities")
+                .master("local[*]")
+                .config("spark.sql.warehouse.dir", warehouseLocation)
+                .config("spark.dynamicAllocation.enabled", true)
+                .config("spark.worker.cleanup.enabled", true)
+                .config("spark.worker.cleanup.interval", "1800") // Limpa o diretório a cada 30 minutos
+                .config("spark.locality.disk.fraction", 0.5)
+                .getOrCreate();
+
+        StructType schema = DataTypes.createStructType(new StructField[] {
+                DataTypes.createStructField("SKU IBGE", DataTypes.StringType, true),
+                DataTypes.createStructField("Sigla País", DataTypes.StringType, true),
+                DataTypes.createStructField("Tipo", DataTypes.StringType, true),
+                DataTypes.createStructField("Ordem Alfabética País", DataTypes.StringType, true),
+                DataTypes.createStructField("SKU Fériaz", DataTypes.StringType, true),
+                DataTypes.createStructField("Município", DataTypes.StringType, true),
+                DataTypes.createStructField("País", DataTypes.StringType, true),
+                DataTypes.createStructField("Região", DataTypes.StringType, true),
+                DataTypes.createStructField("UF", DataTypes.StringType, true),
+                DataTypes.createStructField("Região Turística", DataTypes.StringType, true),
+                DataTypes.createStructField("Arrecadação", DataTypes.StringType, true),
+                DataTypes.createStructField("Cluster", DataTypes.StringType, true)
+        });
+        Dataset<Row>  dataset = spark.read()
+                .format("excel")
+                .option("inferSchema","false")
+                .option("treatEmptyValuesAsNulls", "false")
+                .option("header", "true")
+                .schema(schema)
+                .load(pathDataSet);
+
+        dataset = dataset
+                .withColumnRenamed("SKU IBGE", "skuIBGE")
+                .withColumnRenamed("Sigla País", "siglaPais")
+                .withColumnRenamed("Tipo", "type")
+                .withColumnRenamed("Ordem Alfabética País", "ordemAlfabetica")
+                .withColumnRenamed("SKU Fériaz", "skuFeriaz")
+                .withColumnRenamed("Município", "municipio")
+                .withColumnRenamed("País", "pais")
+                .withColumnRenamed("Região", "regiao")
+                .withColumnRenamed("UF", "uf")
+                .withColumnRenamed("Região Turística", "regiaoTuristica")
+                .withColumnRenamed("Arrecadação", "arrecadacao")
+                .withColumnRenamed("Cluster", "cluster");
+
+
+
+
+
+        dataset.createOrReplaceTempView("cities");
+
+
+
+        Dataset<Row>  datasetStates = spark.read()
+                .option("inferSchema","false")
+                .option("treatEmptyValuesAsNulls", "false")
+                .option("header", "true")
+                .csv(pathDataSetRegions);
+
+
+
+        datasetStates = datasetStates
+                .withColumnRenamed("local_code", "localCode")
+                .withColumnRenamed("name", "nomeEstado")
+                .withColumnRenamed("continent", "continente")
+                .withColumnRenamed("iso_country", "siglaPaisEstado");
+
+
+
+
+
+        datasetStates.createOrReplaceTempView("states");
+
+        Dataset<Row> joinedData = dataset.join(datasetStates,
+                dataset.col("siglaPais").equalTo(datasetStates.col("siglaPaisEstado"))
+                        .and(dataset.col("uf").equalTo(datasetStates.col("localCode"))),
+                "left_outer");
+
+        joinedData.createOrReplaceTempView("cities_states");
+
+        Dataset<Row> result = spark.sql("SELECT " +
+                "c.skuIBGE, " +
+                "c.siglaPais, " +
+                "c.type, " +
+                "c.ordemAlfabetica, " +
+                "c.skuFeriaz, " +
+                "c.municipio, " +
+                "c.pais, " +
+                "c.regiao, " +
+                "c.uf, " +
+                "c.regiaoTuristica, " +
+                "c.arrecadacao, " +
+                "c.cluster, " +
+                "initcap(c.pais) AS paisCamel, " +
+                "s.nomeEstado, " +
+                "s.continente " +
+                "FROM cities_states AS c " +
+                "LEFT JOIN states AS s " +
+                "ON c.siglaPais = s.siglaPaisEstado AND c.uf = s.localCode ");
+
+        result.show(10);
+
+
+        // Configure as configurações do Elasticsearch
+//        Map<String, String> esConfig = new HashMap<>();
+//        esConfig.put("es.nodes", "localhost"); // Endereço do nó Elasticsearch
+//        esConfig.put("es.port", "9200"); // Porta Elasticsearch
+//        esConfig.put("es.index.auto.create", "true"); // Criar índice automaticamente se não existir
+
+        // Configure as configurações do Elasticsearch
+        Map<String, String> esConfig = new HashMap<>();
+        esConfig.put("es.nodes", "https://3a3acaba08d1485d8a6705418dad3793.us-east-1.aws.found.io"); // Endereço do nó Elasticsearch
+        esConfig.put("es.port", "443");
+        esConfig.put("es.index.auto.create", "true"); // Criar índice automaticamente se não existir
+        esConfig.put("es.net.http.auth.user", "elastic"); // Criar índice automaticamente se não existir
+        esConfig.put("es.net.http.auth.pass", "3HOVrpl1WzHndGz3myjYEWi7"); // Criar índice automaticamente se não existir
+        esConfig.put("es.net.ssl", "true");
+        esConfig.put("es.nodes.wan.only","true");
+
+        // Escreva os dados no Elasticsearch
+        result.write()
+                .format("org.elasticsearch.spark.sql") // Use o formato Elasticsearch
+                .options(esConfig)
+                .mode(SaveMode.Append) // Modo de gravação (Append, Overwrite, Ignore, ErrorIfExists)
+                .save("city"); // Nome do índice Elasticsearch
+
+        this.spark.close();
+
+    }
+
+    public void carregaElasticSearchV2(ApplicationArguments args) throws Exception {
+        System.out.println("Executando");
+        var warehouseLocation = new File("/spark-databases").getAbsolutePath();
+        var pathDataSet = DATABASE_PATH.concat("SuperBaseMunicipiosMundo_old.xlsx");
 
         this.spark = SparkSession.builder()
                 .appName("search-cities")
@@ -67,18 +205,22 @@ public class SparkRunProcess implements ApplicationRunner {
                 .getOrCreate();
 
 
-        StructType schema = DataTypes.createStructType(new StructField[] {
-                DataTypes.createStructField("linha", DataTypes.IntegerType, true),
-                DataTypes.createStructField("Municípios", DataTypes.StringType, true),
-                DataTypes.createStructField("Tipo", DataTypes.StringType, true),
-                DataTypes.createStructField("H", DataTypes.StringType, true),
-                DataTypes.createStructField("CEP", DataTypes.StringType, true),
-                DataTypes.createStructField("SKU País", DataTypes.StringType, true),
-                DataTypes.createStructField("SKU Município", DataTypes.StringType, true)
-                // Adicionar mais campos conforme necessário
-        });
 
-        Dataset<Row>  excelSource = spark.read()
+        StructType schema = DataTypes.createStructType(new StructField[] {
+                DataTypes.createStructField("SKU IBGE", DataTypes.StringType, true),
+                DataTypes.createStructField("Sigla País", DataTypes.StringType, true),
+                DataTypes.createStructField("Tipo", DataTypes.StringType, true),
+                DataTypes.createStructField("Ordem Alfabética País", DataTypes.StringType, true),
+                DataTypes.createStructField("SKU Fériaz", DataTypes.StringType, true),
+                DataTypes.createStructField("Município", DataTypes.StringType, true),
+                DataTypes.createStructField("País", DataTypes.StringType, true),
+                DataTypes.createStructField("Região", DataTypes.StringType, true),
+                DataTypes.createStructField("UF", DataTypes.StringType, true),
+                DataTypes.createStructField("Região Turística", DataTypes.StringType, true),
+                DataTypes.createStructField("Arrecadação", DataTypes.StringType, true),
+                DataTypes.createStructField("Cluster", DataTypes.StringType, true)
+        });
+        Dataset<Row>  dataset = spark.read()
                 .format("excel")
                 .option("inferSchema","false")
                 .option("treatEmptyValuesAsNulls", "false")
@@ -86,48 +228,66 @@ public class SparkRunProcess implements ApplicationRunner {
                 .schema(schema)
                 .load(pathDataSet);
 
-        Dataset<Row> datasetRenamed = excelSource
-                                    .withColumnRenamed("Municípios", "municipio")
-                                    .withColumnRenamed("SKU Município", "sku_municipio")
-                                    .withColumnRenamed("SKU País", "sku_pais");
+        dataset = dataset
+                .withColumnRenamed("SKU IBGE", "skuIBGE")
+                .withColumnRenamed("Sigla País", "siglaPais")
+                .withColumnRenamed("Tipo", "type")
+                .withColumnRenamed("Ordem Alfabética País", "ordemAlfabetica")
+                .withColumnRenamed("SKU Fériaz", "skuFeriaz")
+                .withColumnRenamed("Município", "municipio")
+                .withColumnRenamed("País", "pais")
+                .withColumnRenamed("Região", "regiao")
+                .withColumnRenamed("UF", "uf")
+                .withColumnRenamed("Região Turística", "regiaoTuristica")
+                .withColumnRenamed("Arrecadação", "arrecadacao")
+                .withColumnRenamed("Cluster", "cluster");
 
 
 
 
-        datasetRenamed.createOrReplaceTempView("cities");
+
+        dataset.createOrReplaceTempView("cities");
 
 
         // Executando a consulta SQL com a paginação
-        Dataset<Row> paginatedCities = this.spark.sql("SELECT * FROM cities");
+        dataset = this.spark.sql("SELECT * FROM cities");
 
 
-        paginatedCities.select("linha", "municipio", "Tipo", "H", "CEP", "sku_pais", "sku_municipio").distinct().show(10);
-        paginatedCities = paginatedCities
-                .withColumnRenamed("Tipo", "tipo")
-                .withColumnRenamed("H", "h")
-                .withColumnRenamed("CEP", "cep")
-                .withColumnRenamed("sku_municipio", "skuMunicipio")
-                .withColumnRenamed("sku_pais", "skuPais");
+        dataset.select(
+                col("skuIBGE"),
+                col("siglaPais"),
+                col("type"),
+                col("ordemAlfabetica"),
+                col("skuFeriaz"),
+                col("municipio"),
+                col("pais"),
+                col("regiao"),
+                col("uf"),
+                col("regiaoTuristica"),
+                col("arrecadacao"),
+                col("cluster"),
+                initcap(col("pais")).alias("paisCamel")
+        ).distinct().show(10);
+
 
         // Configure as configurações do Elasticsearch
-        Map<String, String> esConfig = new HashMap<>();
-        esConfig.put("es.nodes", "localhost"); // Endereço do nó Elasticsearch
-        esConfig.put("es.port", "9200"); // Porta Elasticsearch
-        esConfig.put("es.index.auto.create", "true"); // Criar índice automaticamente se não existir
+//        Map<String, String> esConfig = new HashMap<>();
+//        esConfig.put("es.nodes", "localhost"); // Endereço do nó Elasticsearch
+//        esConfig.put("es.port", "9200"); // Porta Elasticsearch
+//        esConfig.put("es.index.auto.create", "true"); // Criar índice automaticamente se não existir
 
         // Escreva os dados no Elasticsearch
-        paginatedCities.write()
-                .format("org.elasticsearch.spark.sql") // Use o formato Elasticsearch
-                .options(esConfig)
-                .mode(SaveMode.Append) // Modo de gravação (Append, Overwrite, Ignore, ErrorIfExists)
-                .save("city"); // Nome do índice Elasticsearch
+//        paginatedCities.write()
+//                .format("org.elasticsearch.spark.sql") // Use o formato Elasticsearch
+//                .options(esConfig)
+//                .mode(SaveMode.Append) // Modo de gravação (Append, Overwrite, Ignore, ErrorIfExists)
+//                .save("city"); // Nome do índice Elasticsearch
 
         this.spark.close();
 
     }
 
-        //@Override
-    public void run22(ApplicationArguments args) throws Exception {
+    public void processoTeste(ApplicationArguments args) throws Exception {
         System.out.println("Executando");
         var warehouseLocation = new File("/spark-databases").getAbsolutePath();
         var pathDataSet = DATABASE_PATH.concat("*.xlsx");
@@ -176,8 +336,8 @@ public class SparkRunProcess implements ApplicationRunner {
 
     }
 
-    //@Override
-    public void run2(ApplicationArguments args) throws Exception {
+
+    public void validaçãoArquivos(ApplicationArguments args) throws Exception {
         System.out.println("Executando");
         var warehouseLocation = new File("/spark-databases").getAbsolutePath();
 
@@ -225,7 +385,7 @@ public class SparkRunProcess implements ApplicationRunner {
         }
     }
 
-    public void runXX(ApplicationArguments args) throws Exception {
+    public void importacaoArquivoElasticSearch(ApplicationArguments args) throws Exception {
         System.out.println("Executando");
         var warehouseLocation = new File("/spark-databases").getAbsolutePath();
         var pathDataSet = DATABASE_PATH.concat("*.xlsx");

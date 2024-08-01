@@ -42,4 +42,6 @@ build/
 create_image_on_server.sh
 increment-version.sh
 Dockerfile
-
+*.pem
+*.jks
+*.p12
